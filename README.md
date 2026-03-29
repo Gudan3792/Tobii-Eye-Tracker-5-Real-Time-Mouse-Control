@@ -20,4 +20,7 @@ Please ensure you obtain and use the SDK in compliance with Tobii's licensing te
 This project was inspired by:
 https://github.com/DigitalNatureGroup/TobiiEyeTracker.py
 
-No code from the original project is used.
+You may refer to the above repository for general guidance on setting up the Tobii SDK.
+Please ensure you comply with Tobii's licensing terms.
+
+
