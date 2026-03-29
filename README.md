@@ -1,18 +1,22 @@
 # Tobii-Eye-Tracker-5-Real-Time-Mouse-Control
 Control your mouse cursor in real-time using Tobii Eye Tracker 5 gaze data.
+This project does not include any proprietary SDK files.
 
 ## Requirements
 
 - Python 3.10.11 (32-bit)
 - Tobii Eye Tracker 5
-- tobii_stream_engine.dll
-
+- Tobii SDK (not included)
 
 ## Notice
 
-Due to licensing restrictions, the Tobii SDK is not included in this repository.
+This project requires the Tobii SDK, which is not distributed with this repository.
 
-You may refer to the following project for guidance on SDK setup:
+Please ensure you obtain and use the SDK in compliance with Tobii's licensing terms.
+
+## Credits
+
+This project was inspired by:
 https://github.com/DigitalNatureGroup/TobiiEyeTracker.py
 
-Please ensure you comply with Tobii's licensing terms when obtaining and using the SDK.
+No code from the original project is used.
