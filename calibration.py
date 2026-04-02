@@ -88,7 +88,14 @@ tobii.tobii_device_process_callbacks.argtypes = [c_void_p]
 tobii.tobii_device_process_callbacks.restype = c_int
 
 
+# --- 안구 조준점 보정(캘리브레이션) 앱 클래스 ---
+# 사용자의 시선과 실제 모니터 좌표 간의 오차를 바로잡아주는 12포인트 캘리브레이션 로직입니다.
 class CalibrationApp:
+    """
+    최초 실행 시 검은색 전체 화면에 12개의 점(4x3 배열)을 차례대로 띄웁니다.
+    사용자가 한 점을 약 1.5초간 안정적으로 응시하면(Fixation), 
+    해당 시점의 생체 시선 데이터(Raw Gaze)들을 모아 중앙값을 구하고 '실제로 화면에 표시된 점의 위치'와의 차이를 계산하여 구성 파일에 저장합니다.
+    """
     def __init__(self, root):
         self.root = root
         self.root.title("Eye Tracker Calibration")
@@ -145,14 +152,14 @@ class CalibrationApp:
 
         tobii.tobii_enumerate_local_device_urls(self.api, self.url_cb, None)
         
+        self.running = True
         if not self.device_url:
-            print("No device found")
+            print("No device found. Running Calibration in Test Mode.")
             return
 
         tobii.tobii_device_create(self.api, self.device_url, TOBII_FIELD_OF_USE_INTERACTIVE, ctypes.byref(self.device))
         tobii.tobii_gaze_point_subscribe(self.device, self.gaze_cb, None)
         
-        self.running = True
         self.thread = threading.Thread(target=self.tobii_loop, daemon=True)
         self.thread.start()
 
@@ -204,6 +211,11 @@ class CalibrationApp:
             self.finish_calibration()
 
     def check_fixation(self):
+        """
+        초당 수십 번씩 사용자의 안구 시선(최근 15프레임 분량)을 확인하여, 시선이 바깥으로 크게 튀지 않고
+        노란색 원 반경 영역 내에 좁게(안정적으로) 고정되어 있는지 지속적으로 판별합니다.
+        시선이 안정적이라고 판단되면 파란색 게이지(Progress Arc)를 채우며, 1.5초를 채우면 데이터를 수집/완료합니다.
+        """
         if self.current_point_idx >= len(self.points) or self.verifying:
             return
 
@@ -364,7 +376,12 @@ class CalibrationApp:
                 self.canvas.create_line(tx, ty, mx_px, my_px, fill="gray", dash=(4, 4))
                 
     def map_gaze(self, rx, ry):
-        """Map raw gaze point to target point using Inverse Distance Weighting."""
+        """
+        [수학적 보정 핵심 로직: 역거리 가중치 보간법 (Inverse Distance Weighting, IDW)]
+        수집 완료된 12개의 캘리브레이션 오차 스펙트럼 데이터를 기반으로 구동됩니다.
+        현재 사용자가 쳐다보고 있는 생체 원시 좌표(rx, ry)를 기준 삼아, 가장 가까운 주변 점들의 왜곡 오차값을 추출한 뒤 
+        역산(가까울수록 높은 가중치 부여)하여 최종적으로 가장 완벽한 화면 좌표(모니터 마우스 위치)로 맵핑(Mapping)시켜줍니다.
+        """
         if not hasattr(self, 'temp_cal_grid') or not self.temp_cal_grid:
             return rx, ry
 
@@ -400,6 +417,10 @@ class CalibrationApp:
         return rx + disp_x, ry + disp_y
 
     def verify_loop(self):
+        """
+        12개의 캘리브레이션 포인트 수집이 모두 끝난 직후, ini 파일(설정 파일)에 영구 저장하기 전에 
+        방금 조정한 보간법(map_gaze)이 정상적으로 눈을 따라가는지 십자선 커서로 테스트 해보는 '시선 검증(Verification)' 전용 무한루프입니다.
+        """
         if not self.verifying:
             return
             
@@ -450,9 +471,19 @@ class CalibrationApp:
 
     def save_ini(self):
         config = configparser.ConfigParser()
-        # Read existing to keep old settings just in case
-        if os.path.exists('eye_setting.ini'):
-            config.read('eye_setting.ini', encoding='utf-8')
+        ini_path = 'eye_setting.ini'
+        
+        # 기존 설정 읽기 (다른 섹션 보존을 위해)
+        if os.path.exists(ini_path):
+            try:
+                with open(ini_path, 'r', encoding='utf-8-sig') as f:
+                    config.read_file(f)
+            except Exception:
+                try:
+                    with open(ini_path, 'r', encoding='cp949') as f:
+                        config.read_file(f)
+                except Exception:
+                    pass
             
         if 'CalibrationGrid' not in config:
             config['CalibrationGrid'] = {}
@@ -465,16 +496,37 @@ class CalibrationApp:
             config['CalibrationGrid'][f'target_x_{i}'] = f"{pt['target_x']:.5f}"
             config['CalibrationGrid'][f'target_y_{i}'] = f"{pt['target_y']:.5f}"
 
-        # Maintain global smooth value
+        # Calibration 섹션 보존 및 기본값 설정
         if 'Calibration' not in config:
             config['Calibration'] = {}
+        
+        # 값이 없는 경우에만 기본값 설정 (기존 값 보존)
         if 'smooth' not in config['Calibration']:
-             config['Calibration']['smooth'] = "0.15"
+             config['Calibration']['smooth'] = "0.1"
         if 'avg_samples' not in config['Calibration']:
-             config['Calibration']['avg_samples'] = "15"
+             config['Calibration']['avg_samples'] = "10"
+        if 'zoom_min' not in config['Calibration']:
+             config['Calibration']['zoom_min'] = "1.0"
+        if 'zoom_max' not in config['Calibration'] or config['Calibration']['zoom_max'] == "3.0":
+             config['Calibration']['zoom_max'] = "3.0"
+        if 'zoom_size' not in config['Calibration']:
+             config['Calibration']['zoom_size'] = "300"
+        if 'zoom_scale' not in config['Calibration']:
+             config['Calibration']['zoom_scale'] = "3.0"
+        if 'click_delay' not in config['Calibration']:
+             config['Calibration']['click_delay'] = "0.1"
+        if 'blink_min' not in config['Calibration']:
+             config['Calibration']['blink_min'] = "0.3"
+        if 'blink_max' not in config['Calibration']:
+             config['Calibration']['blink_max'] = "1.0"
+        if 'deep_sleep_threshold' not in config['Calibration']:
+             config['Calibration']['deep_sleep_threshold'] = "5.0"
+        if 'bottom_block_threshold' not in config['Calibration']:
+             config['Calibration']['bottom_block_threshold'] = "0.96"
 
-        with open('eye_setting.ini', 'w', encoding='utf-8') as f:
-            # Write Grid Data
+        # 파일 저장 (UTF-8 with BOM으로 저장하여 윈도우 호환성 극대화)
+        with open(ini_path, 'w', encoding='utf-8-sig') as f:
+            # Grid Data 섹션 작성
             f.write("[CalibrationGrid]\n")
             f.write(f"point_count = {config['CalibrationGrid']['point_count']}\n")
             for i in range(int(config['CalibrationGrid']['point_count'])):
@@ -487,9 +539,35 @@ class CalibrationApp:
             f.write("; smooth: 마우스 움직임의 부드러움 정도 (0.01 ~ 1.0)\n")
             f.write("; 값이 작을수록 더 부드럽게 움직이지만 약간의 지연이 생길 수 있습니다 (추천: 0.1 ~ 0.2)\n")
             f.write(f"smooth = {config['Calibration']['smooth']}\n\n")
+
             f.write("; avg_samples: 몇 개의 시선 데이터를 평균 내어 사용할지 결정 (1 ~ 50)\n")
             f.write("; 값이 클수록 떨림이 적어지지만 반응 속도가 느려질 수 있습니다 (추천: 10 ~ 20)\n")
-            f.write(f"avg_samples = {config['Calibration']['avg_samples']}\n")
+            f.write(f"avg_samples = {config['Calibration']['avg_samples']}\n\n")
+            
+            f.write("; blink_min: 눈을 최소한 이 시간(초)만큼 감아야 클릭으로 인식합니다 (기본: 0.3)\n")
+            f.write(f"blink_min = {config['Calibration']['blink_min']}\n\n")
+            f.write("; blink_max: 이 시간(초) 이상 감으면 줌 모드로 넘어갑니다. (999로 설정 시 일반 클릭 비활성화)\n")
+            f.write(f"blink_max = {config['Calibration']['blink_max']}\n\n")
+            
+            f.write("; zoom_min: 눈을 이 시간(초) 이상 감으면 줌 모드에 진입합니다 (기본: 1.0)\n")
+            f.write(f"zoom_min = {config['Calibration']['zoom_min']}\n\n")
+            f.write("; zoom_max: 이 시간(초) 이상 감으면 취소됩니다. (999로 설정 시 줌 모드 비활성화 / 기본: 3.0)\n")
+            f.write(f"zoom_max = {config['Calibration']['zoom_max']}\n\n")
+            
+            f.write("; zoom_size: 줌 모드에서 캡처할 원본 영역의 크기 (기본: 300)\n")
+            f.write(f"zoom_size = {config['Calibration']['zoom_size']}\n\n")
+            f.write("; zoom_scale: 줌 모드의 확대 배율 (기본: 3.0)\n")
+            f.write(f"zoom_scale = {config['Calibration']['zoom_scale']}\n\n")
+            
+            f.write("; 클릭 시 마우스가 튀는 현상을 방지합니다.\n")
+            f.write(f"click_delay = {config['Calibration']['click_delay']}\n\n")
+            
+            f.write("; deep_sleep_threshold: 이 시간(초) 이상 눈을 감으면 '장시간 수면' 상태로 간주합니다. (기본: 5.0)\n")
+            f.write(f"deep_sleep_threshold = {config['Calibration']['deep_sleep_threshold']}\n\n")
+
+            f.write("; bottom_block_threshold: 장기 수면 후 복귀 시 클릭을 차단할 하단 영역의 임계값 (기본: 0.96)\n")
+            f.write("; 윈도우 하단 바의 절반보다 살짝 작은 영역(약 하단 4%)에서 발생하는 노이즈 클릭을 차단합니다.\n")
+            f.write(f"bottom_block_threshold = {config['Calibration']['bottom_block_threshold']}\n")
 
     def exit_app(self, event):
         self.running = False
